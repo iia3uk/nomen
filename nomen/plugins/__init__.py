@@ -1,4 +1,9 @@
-"""Plugin system for extending generators / validators."""
+"""Plugin system for extending generators / validators.
+
+Plugins run in the orchestrator process only. They are not pickled into
+ProcessPoolExecutor workers — register them before `run_engine`, and do not
+expect generator plugins to be chunked like the built-in engines.
+"""
 
 from __future__ import annotations
 

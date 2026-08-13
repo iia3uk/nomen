@@ -13,6 +13,7 @@ from collections import Counter
 from collections.abc import Callable
 
 from nomen.diversity.features import cv_pattern, soft_consonant_ratio, vowel_a_ratio
+from nomen.hashing import stable_seed
 from nomen.linguistics import brand_phonotactic_score, is_vowel, looks_premium_brand, normalize
 from nomen.training.models import BrandLanguageModels
 
@@ -54,7 +55,7 @@ class GenerationEngine:
         self.min_len = min_len
         self.max_len = max_len
         self.workers = workers
-        self.base_seed = abs(hash(seed)) % (2**31)
+        self.base_seed = stable_seed(seed, bits=31)
         self.exploration_salt = 0
         self.seed_str = seed
         self.lm = BrandLanguageModels(seed=self.base_seed)

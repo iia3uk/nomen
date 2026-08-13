@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
+from nomen.hashing import stable_seed
 from nomen.linguistics import is_vowel, load_training_brands, normalize
 
 
@@ -74,7 +75,7 @@ class BrandLanguageModels:
         self.itos = {i: c for c, i in self.stoi.items()}
         d = 16
         n = len(alphabet)
-        rng = np.random.default_rng(abs(hash(tuple(self.brands[:20]))) % (2**32))
+        rng = np.random.default_rng(stable_seed("|".join(self.brands[:20]), bits=32))
         self.E = rng.normal(0, 0.1, size=(n, d))
         # Fit embeddings toward co-occurrence: simple PMI-ish nudge
         for bg, cnt in self.bigrams.items():

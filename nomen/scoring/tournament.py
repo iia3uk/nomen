@@ -14,6 +14,7 @@ class TournamentResult:
     winners: list[Candidate]
     eliminated: list[Candidate]
     votes: dict[str, int]
+    fought: dict[str, int]
 
 
 def _stable_seed(*parts: str) -> int:
@@ -58,36 +59,31 @@ def run_tournament(
     n_users: int = 100,
     seed: int = 42,
 ) -> TournamentResult:
-    """Pairwise preference tournament; keep top brands by win count + beauty."""
+    """Pairwise preference tournament; keep top brands by win-rate + beauty."""
     if len(candidates) <= keep:
-        return TournamentResult(winners=list(candidates), eliminated=[], votes={})
+        return TournamentResult(winners=list(candidates), eliminated=[], votes={}, fought={})
 
     rng = random.Random(seed)
     pool = list(candidates)
     wins: dict[str, int] = {c.name: 0 for c in pool}
+    fought: dict[str, int] = {c.name: 0 for c in pool}
     max_opponents = min(12, len(pool) - 1)
-    seen_pairs: set[tuple[str, str]] = set()
 
-    for c in pool:
-        others = [x for x in pool if x.name != c.name]
-        rng.shuffle(others)
-        fought = 0
-        for opp in others:
-            pair = tuple(sorted((c.name, opp.name)))
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
-            match_seed = seed ^ _stable_seed(pair[0], pair[1]) ^ (fought * 997)
-            winner = pairwise_prefer(c, opp, n_users=n_users, seed=match_seed)
-            wins[winner.name] = wins.get(winner.name, 0) + 1
-            fought += 1
-            if fought >= max_opponents:
-                break
+    pairs = [(pool[i], pool[j]) for i in range(len(pool)) for j in range(i + 1, len(pool))]
+    rng.shuffle(pairs)
+    for a, b in pairs:
+        if fought[a.name] >= max_opponents and fought[b.name] >= max_opponents:
+            continue
+        match_seed = seed ^ _stable_seed(a.name, b.name) ^ (fought[a.name] + fought[b.name])
+        winner = pairwise_prefer(a, b, n_users=n_users, seed=match_seed)
+        wins[winner.name] += 1
+        fought[a.name] += 1
+        fought[b.name] += 1
 
     ranked = sorted(
         pool,
         key=lambda c: (
-            wins.get(c.name, 0),
+            wins[c.name] / max(1, fought[c.name]),
             c.scores.beauty_score,
             c.scores.overall,
             c.scores.brand_score,
@@ -98,4 +94,5 @@ def run_tournament(
         winners=ranked[:keep],
         eliminated=ranked[keep:],
         votes=wins,
+        fought=fought,
     )

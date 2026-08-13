@@ -6,6 +6,7 @@ A new candidate replaces an archived name only if it is objectively better
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import orjson
 
 from nomen.linguistics import normalize, reserved_brands
 from nomen.models import Candidate
+from nomen.persist import atomic_write_bytes
 
 
 class EliteArchive:
@@ -28,7 +30,8 @@ class EliteArchive:
                 data = orjson.loads(self.path.read_bytes())
                 if isinstance(data, list):
                     self.entries = data
-            except Exception:
+            except Exception as exc:
+                print(f"elite archive unreadable ({exc}); starting empty", file=sys.stderr)
                 self.entries = []
         reserved = reserved_brands()
         if reserved:
@@ -43,7 +46,7 @@ class EliteArchive:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_bytes(orjson.dumps(self.entries, option=orjson.OPT_INDENT_2))
+        atomic_write_bytes(self.path, orjson.dumps(self.entries, option=orjson.OPT_INDENT_2))
 
     def names(self) -> list[str]:
         return [e["name"] for e in self.entries if "name" in e]

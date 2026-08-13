@@ -83,14 +83,17 @@ class OfflineFilterBank:
             if hit:
                 reasons.append(f"english: contains '{hit}'")
             else:
-                for w in self.english:
-                    if len(w) < 4:
-                        continue
-                    if n.startswith(w) or n.endswith(w):
-                        residue = n[len(w) :] if n.startswith(w) else n[: -len(w)]
-                        if residue in {"", "s", "es", "ed", "er", "ing", "y", "ly"}:
-                            reasons.append(f"english: contains '{w}'")
-                            break
+                for wlen in range(4, len(n)):
+                    hit_affix = False
+                    for w in self._english_by_len.get(wlen, []):
+                        if n.startswith(w) or n.endswith(w):
+                            residue = n[len(w) :] if n.startswith(w) else n[: -len(w)]
+                            if residue in {"", "s", "es", "ed", "er", "ing", "y", "ly"}:
+                                reasons.append(f"english: contains '{w}'")
+                                hit_affix = True
+                                break
+                    if hit_affix:
+                        break
 
             for other in self._english_by_len.get(len(n), []):
                 if Levenshtein.distance(n, other) <= 1:

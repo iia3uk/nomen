@@ -8,6 +8,12 @@ from pathlib import Path
 import orjson
 
 from nomen.models import Candidate
+from nomen.persist import atomic_write_bytes
+
+
+def _csv_cell(text: str, limit: int = 240) -> str:
+    collapsed = " ".join(str(text).split())
+    return collapsed[:limit]
 
 
 def export_all(
@@ -18,14 +24,16 @@ def export_all(
     out.mkdir(parents=True, exist_ok=True)
     all_rows = checked + rejected
 
-    (out / "results.json").write_bytes(
-        orjson.dumps([c.model_dump(mode="json") for c in all_rows], option=orjson.OPT_INDENT_2)
+    atomic_write_bytes(
+        out / "results.json",
+        orjson.dumps([c.model_dump(mode="json") for c in all_rows], option=orjson.OPT_INDENT_2),
     )
-    (out / "rejected.json").write_bytes(
+    atomic_write_bytes(
+        out / "rejected.json",
         orjson.dumps(
             [c.model_dump(mode="json") for c in rejected if not c.clean],
             option=orjson.OPT_INDENT_2,
-        )
+        ),
     )
 
     fields = [
@@ -80,8 +88,8 @@ def export_all(
                     "collision_probability": c.scores.collision_probability,
                     "seo_uniqueness": c.scores.seo_uniqueness,
                     "domains_registered": ",".join(c.domains_registered),
-                    "rejection_reasons": " | ".join(c.rejection_reasons),
-                    "errors": " | ".join(c.errors),
+                    "rejection_reasons": _csv_cell(" | ".join(c.rejection_reasons)),
+                    "errors": _csv_cell(" | ".join(c.errors)),
                 }
             )
 
