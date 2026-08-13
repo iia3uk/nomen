@@ -51,6 +51,15 @@ def _reason_tally(cands: list[Candidate], n: int = 4) -> str:
     return "  (" + ", ".join(f"{k} {v}" for k, v in cnt.most_common(n)) + ")"
 
 
+def _round_budget(cfg: AppConfig, remaining: int) -> tuple[int, int]:
+    """Don't burn a 30k hunt when one clean name is missing."""
+    if remaining <= 1:
+        return min(cfg.generate_batch, 4_000), min(120, max(cfg.online_batch, 80))
+    if remaining <= 3:
+        return min(cfg.generate_batch, 8_000), cfg.online_batch
+    return cfg.generate_batch, cfg.online_batch
+
+
 def _stage(label: str, kept: int, dropped: int = 0, elapsed: float | None = None, extra: str = "") -> None:
     drop = f"  drop={dropped:,}" if dropped else ""
     timing = f"  {elapsed:.1f}s" if elapsed is not None else ""
@@ -175,16 +184,23 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                 state.exploration_restarts += 1
                 stagnant_rounds = 0
 
+            remaining = cfg.target_clean - len(clean)
+            gen_n, online_n = _round_budget(cfg, remaining)
             console.rule(
                 f"[bold]Round {round_i} — clean {len(clean)}/{cfg.target_clean} "
-                f"(restarts={state.exploration_restarts})"
+                f"(need {remaining}, restarts={state.exploration_restarts})"
             )
             if clean:
                 console.print(
                     "[dim]Holding:[/] " + ", ".join(c.display_name for c in clean)
                 )
+            if gen_n < cfg.generate_batch:
+                console.print(
+                    f"[yellow]Last-mile:[/] shrinking generate {cfg.generate_batch:,} → {gen_n:,}  "
+                    f"online={online_n}"
+                )
             console.print(
-                f"Generating novelty batch of {cfg.generate_batch:,} "
+                f"Generating novelty batch of {gen_n:,} "
                 f"(chunked across CPU workers)…"
             )
             gen_done = {"n": 0}
@@ -197,9 +213,9 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                     f"unique={unique:,}  job {gen_done['n']}"
                 )
 
-            provenance = engine.generate_all(cfg.generate_batch, on_generator=_on_generator)
+            provenance = engine.generate_all(gen_n, on_generator=_on_generator)
             for plugin in iter_generators():
-                for name in plugin.generate(max(100, cfg.generate_batch // 20)):
+                for name in plugin.generate(max(100, gen_n // 20)):
                     provenance.setdefault(name, f"plugin:{plugin.name}")
 
             stats = engine.last_stats
@@ -261,7 +277,7 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
             )
 
             # Diversity-hard selection for online queue
-            need = max(cfg.online_batch * 2, cfg.target_clean * 6)
+            need = max(online_n * 2, remaining * 8, 24)
             sel = selector.select(
                 scored,
                 limit=need,
@@ -278,7 +294,7 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                 state.exploration_restarts += 1
 
             # Human simulation: 100 virtual users, pairwise tournament
-            tourney_keep = max(cfg.online_batch, cfg.target_clean * 3)
+            tourney_keep = max(online_n, remaining * 4, 16)
             tourney = run_tournament(
                 sel.selected,
                 keep=tourney_keep,
@@ -292,8 +308,8 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
 
             queue = tourney.winners
             elite_drop = 0
-            # Compete against permanent elite archive (soft gate when full)
-            elite_floor = elite.must_beat_floor()
+            # Last 1–2 names: don't lose the only remaining slot to elite floor
+            elite_floor = 0.0 if remaining <= 2 else elite.must_beat_floor()
             if elite_floor > 0:
                 kept_q: list[Candidate] = []
                 for c in queue:

@@ -199,13 +199,14 @@ class BeautyModel:
 
     @staticmethod
     def _load_brands() -> list[str]:
-        # Prefer large corpus ∪ premium; patterns only, never emit verbatim.
+        # Patterns only, never emit verbatim. 4–12 keeps letter priors rich;
+        # generators still emit cfg.min_len..max_len (5–9 by default).
         seen: set[str] = set()
         out: list[str] = []
         for src in ("brands_corpus.txt", "brands_premium.txt"):
             for w in load_lines(src):
                 w = normalize(w)
-            if 5 <= len(w) <= 9 and w.isalpha() and w not in seen:
+                if 4 <= len(w) <= 12 and w.isalpha() and w not in seen:
                     seen.add(w)
                     out.append(w)
         return out

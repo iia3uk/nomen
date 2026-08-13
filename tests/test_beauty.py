@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from nomen.filters.offline import OfflineFilterBank
 from nomen.models import Candidate
-from nomen.scoring.beauty import beauty_breakdown, beauty_score, passes_beauty_gates
+from nomen.scoring.beauty import BeautyModel, beauty_breakdown, beauty_score, get_beauty_model, passes_beauty_gates
 from nomen.scoring.overall import W_BEAUTY, W_BRAND, W_COLLISION, W_NOVELTY, compute_overall
 from nomen.scoring.scorer import score_candidate
 from nomen.scoring.tournament import run_tournament
@@ -13,6 +13,13 @@ from nomen.scoring.tournament import run_tournament
 def test_weights_sum_and_beauty_dominates() -> None:
     assert abs(W_BEAUTY + W_BRAND + W_NOVELTY + W_COLLISION - 1.0) < 1e-9
     assert W_BEAUTY > W_BRAND > W_NOVELTY > W_COLLISION
+
+
+def test_beauty_training_corpus_is_not_collapsed() -> None:
+    brands = BeautyModel._load_brands()
+    assert len(brands) > 500, f"beauty corpus collapsed to {len(brands)} names"
+    get_beauty_model.cache_clear()
+    assert get_beauty_model().n_brands > 500
 
 
 def test_premium_brands_score_high() -> None:
