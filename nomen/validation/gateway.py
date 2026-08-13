@@ -14,6 +14,8 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from nomen.config import AppConfig, Secrets
 from nomen.models import Candidate, Stage
 
+_POSITIVE_TTL = 72 * 3600
+_NEGATIVE_TTL = 6 * 3600
 _HIT = re.compile(
     r"\b(software|company|startup|repository|package|framework|cms|saas|platform|brand)\b",
     re.I,
@@ -69,7 +71,8 @@ class ValidationGateway:
                 }
             except Exception:
                 payload = {"status": resp.status_code, "text": resp.text, "json": None}
-            self.cache.set(cache_key, payload, expire=72 * 3600)
+            ttl = _NEGATIVE_TTL if resp.status_code == 404 else _POSITIVE_TTL
+            self.cache.set(cache_key, payload, expire=ttl)
         return resp
 
     async def _exists(self, url: str, key: str) -> bool | None:
@@ -308,8 +311,27 @@ class ValidationGateway:
             "wordpress": wp,
             "gitlab": gitlab,
         }
+        candidate.errors = errors
+        unverified = [k for k, v in candidate.registries.items() if v is None]
+        candidate.meta["unverified"] = unverified
 
-        # Domains
+        if (gh or 0) > 0:
+            return candidate.reject(Stage.GITHUB, f"GitHub repositories={gh}")
+        for label, val in [
+            ("npm", npm),
+            ("pypi", pypi),
+            ("crates", crates),
+            ("rubygems", gem),
+            ("nuget", nuget),
+            ("packagist", packagist),
+            ("dockerhub", docker),
+            ("wordpress", wp),
+            ("gitlab", gitlab),
+        ]:
+            if val is True:
+                return candidate.reject(Stage.REGISTRY, f"{label} exists")
+
+        # Domains — skipped when a registry already killed the name
         domains: list[str] = []
         domain_states = await asyncio.gather(
             *[cap(f"domain.{t}", self.domain(f"{name}.{t}")) for t in self.cfg.tlds]
@@ -318,6 +340,10 @@ class ValidationGateway:
             if state is True:
                 domains.append(f"{name}.{tld}")
         candidate.domains_registered = domains
+        candidate.errors = errors
+
+        if self.cfg.strict and domains:
+            return candidate.reject(Stage.DOMAIN, f"registered: {', '.join(domains)}")
 
         # Search / company / trademark proxies
         web, company, software, tm = await asyncio.gather(
@@ -350,26 +376,6 @@ class ValidationGateway:
         candidate.trademark_hits = hits(tm)
         candidate.errors = errors
 
-        # Decision tree
-        if (gh or 0) > 0:
-            return candidate.reject(Stage.GITHUB, f"GitHub repositories={gh}")
-        for label, val in [
-            ("npm", npm),
-            ("pypi", pypi),
-            ("crates", crates),
-            ("rubygems", gem),
-            ("nuget", nuget),
-            ("packagist", packagist),
-            ("dockerhub", docker),
-            ("wordpress", wp),
-            ("gitlab", gitlab),
-        ]:
-            if val is True:
-                return candidate.reject(Stage.REGISTRY, f"{label} exists")
-
-        if self.cfg.strict and domains:
-            return candidate.reject(Stage.DOMAIN, f"registered: {', '.join(domains)}")
-
         if (hits(web) or 0) > 0:
             return candidate.reject(Stage.SEARCH, f"web hits={hits(web)}")
         if (hits(software) or 0) > 0:
@@ -379,6 +385,10 @@ class ValidationGateway:
         if (candidate.trademark_hits or 0) > 0:
             return candidate.reject(Stage.TRADEMARK, f"trademark hits={candidate.trademark_hits}")
 
+        unverified = [k for k, v in candidate.registries.items() if v is None]
+        candidate.meta["unverified"] = unverified
+        if self.cfg.strict and unverified:
+            return candidate.reject(Stage.REGISTRY, f"unverified: {', '.join(unverified)}")
         if self.cfg.strict and errors:
             return candidate.reject(Stage.REGISTRY, f"strict errors: {errors[0]}")
 

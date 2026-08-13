@@ -32,17 +32,22 @@ def default_workers(cap: int | None = None) -> int:
 
 def _generate_worker(payload: dict[str, Any]) -> tuple[str, list[str]]:
     """Top-level picklable worker for ProcessPoolExecutor (Windows-safe)."""
+    from collections import Counter
+
     from nomen.generation.engine import GenerationEngine
 
     label = payload["label"]
     eng = GenerationEngine(
-        seed=f"{payload['seed']}|{label}|{payload['salt']}",
+        seed=f"{payload['seed']}|{label}|{payload['salt']}|{payload.get('chunk', 0)}",
         min_len=payload["min_len"],
         max_len=payload["max_len"],
     )
     eng.exploration_salt = int(payload["salt"])
     eng.set_archive(list(payload.get("archive") or []))
     eng.set_winners(list(payload.get("winners") or []))
+    eng._letter_pressure = Counter(payload.get("pressure") or {})
+    eng._ending_pressure = Counter(payload.get("endings") or {})
+    eng._ending_cap = max(8, int(payload["count"]) * 7 // 100)
     method_name = _GEN_METHODS[label]
     names = getattr(eng, method_name)(int(payload["count"]))
     return label, names
@@ -58,26 +63,32 @@ def parallel_generate(
     payloads: list[dict[str, Any]],
     *,
     workers: int | None = None,
+    on_done: Callable[[str, int, int], None] | None = None,
 ) -> dict[str, str]:
     """Run generator quotas in parallel processes. Returns name -> generator."""
     if not payloads:
         return {}
     n_workers = min(_resolve_workers(workers), len(payloads))
     provenance: dict[str, str] = {}
+
+    def ingest(label: str, names: list[str]) -> None:
+        for name in names:
+            provenance.setdefault(name, label)
+        if on_done:
+            on_done(label, len(names), len(provenance))
+
     # On tiny batches, skip process spawn overhead
     if n_workers <= 1 or len(payloads) == 1:
         for p in payloads:
             label, names = _generate_worker(p)
-            for name in names:
-                provenance.setdefault(name, label)
+            ingest(label, names)
         return provenance
 
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = [pool.submit(_generate_worker, p) for p in payloads]
         for fut in as_completed(futures):
             label, names = fut.result()
-            for name in names:
-                provenance.setdefault(name, label)
+            ingest(label, names)
     return provenance
 
 

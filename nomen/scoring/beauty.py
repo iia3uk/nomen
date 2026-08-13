@@ -130,6 +130,8 @@ class BeautyBreakdown:
     naturalness: float
     beauty_score: float
     reject_reasons: tuple[str, ...] = ()
+    gate: str = ""
+    raw_beauty: float = 0.0
 
 
 def _syllables(name: str) -> list[str]:
@@ -203,7 +205,7 @@ class BeautyModel:
         for src in ("brands_corpus.txt", "brands_premium.txt"):
             for w in load_lines(src):
                 w = normalize(w)
-                if 4 <= len(w) <= 12 and w.isalpha() and w not in seen:
+            if 5 <= len(w) <= 9 and w.isalpha() and w not in seen:
                     seen.add(w)
                     out.append(w)
         return out
@@ -517,14 +519,10 @@ class BeautyModel:
             premium -= 12
         if soft >= 3 and n.count("a") >= 2 and n[-1] in "aoe":
             premium -= 20  # fantasy sludge
-        # Pure CVCVCV Romance float (…ata/…ora/…iva) — game/fantasy, not SaaS
-        if (
-            tmpl.startswith("CVCV")
-            and n.endswith(("a", "o"))
-            and soft_ratio >= 0.30
-            and mean_bi < -5.5
-        ):
-            premium -= 16
+        # Open-vowel romance float (Plerasta / Velunda / Merosta), not only CVCV…
+        if n.endswith(("a", "o")) and soft_ratio >= 0.30 and mean_bi < -5.5:
+            if "CVCV" in tmpl or n.count("a") >= 2:
+                premium -= 16
         if n.count("a") >= 2 and n[-1] in "ao":
             premium -= 12
         if re.search(r"(.)\1\1", n):
@@ -540,8 +538,10 @@ class BeautyModel:
         naturalness = 75.0 + (mean_bi + 6.5) * 10
         if rejects:
             naturalness -= 40
-        # Unique letter ratio too high with rare letters = invented soup
-        if sum(1 for c in n if self.unigrams[c] < self.n_brands * 0.02) >= 2:
+        # Unique letter ratio too high with rare letters = invented soup.
+        # Use unigram mass, not n_brands*0.02 (small corpora over-penalize j/w/z).
+        rare = [c for c in set(n) if self.unigrams[c] / self._uni_total < 0.006]
+        if len(rare) >= 3 or (len(rare) >= 2 and any(c in "qx" for c in rare)):
             naturalness -= 18
         if soft_ratio > 0.5 and mean_bi < -5.8:
             naturalness -= 15
@@ -589,13 +589,19 @@ class BeautyModel:
         if rejects:
             beauty = min(beauty, 42.0) - 8 * len(rejects)
 
-        # Homepage belief gate: if naturalness or premium tank, cap
+        raw_beauty = beauty
+        gate = ""
+        # Homepage belief gate: if naturalness or premium tank, cap.
+        # This is a veto layer on top of the linear mix — not a hidden extra weight.
         if comps["premium"] < 60 or comps["naturalness"] < 55:
             beauty = min(beauty, 68.0)
+            gate = "premium/naturalness"
         if comps["premium"] < 55 or comps["naturalness"] < 50:
             beauty = min(beauty, 58.0)
+            gate = "premium/naturalness"
         if comps["readability"] < 55 or comps["memorability"] < 55:
             beauty = min(beauty, 62.0)
+            gate = gate or "readability/memorability"
 
         return BeautyBreakdown(
             rhythm=comps["rhythm"],
@@ -614,6 +620,8 @@ class BeautyModel:
             naturalness=comps["naturalness"],
             beauty_score=round(clamp(beauty), 2),
             reject_reasons=rejects,
+            gate=gate,
+            raw_beauty=round(clamp(raw_beauty), 2),
         )
 
 
@@ -635,7 +643,12 @@ def passes_beauty_gates(name: str, min_beauty: float = 72.0) -> tuple[bool, list
     bd = beauty_breakdown(name)
     reasons: list[str] = list(bd.reject_reasons)
     if bd.beauty_score < min_beauty:
-        reasons.append(f"beauty {bd.beauty_score:.1f} < {min_beauty}")
+        if bd.gate and bd.raw_beauty > bd.beauty_score + 0.5:
+            reasons.append(
+                f"capped by {bd.gate} gate (raw {bd.raw_beauty:.1f} → {bd.beauty_score:.1f})"
+            )
+        else:
+            reasons.append(f"beauty {bd.beauty_score:.1f} < {min_beauty}")
     if bd.readability < 60:
         reasons.append(f"readability {bd.readability:.1f}")
     if bd.memorability < 60:

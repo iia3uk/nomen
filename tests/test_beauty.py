@@ -87,3 +87,10 @@ def test_beauty_model_does_not_require_verbatim_match() -> None:
     # Learned statistics should score a novel-but-natural name decently
     score = beauty_score("novira")
     assert 40 <= score <= 100
+
+
+def test_beauty_gate_records_raw_score() -> None:
+    bd = beauty_breakdown("zeflogho")
+    assert bd.raw_beauty >= bd.beauty_score
+    if bd.gate:
+        assert bd.raw_beauty >= bd.beauty_score

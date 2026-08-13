@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
+from collections import Counter
 from pathlib import Path
 
 import diskcache
@@ -35,6 +37,24 @@ if hasattr(sys.stdout, "reconfigure"):
         pass
 
 console = Console(legacy_windows=False, soft_wrap=True)
+
+
+def _reason_tally(cands: list[Candidate], n: int = 4) -> str:
+    cnt: Counter[str] = Counter()
+    for c in cands:
+        if c.rejected_at:
+            cnt[c.rejected_at.value] += 1
+        elif c.rejection_reasons:
+            cnt[c.rejection_reasons[0].split(":", 1)[0]] += 1
+    if not cnt:
+        return ""
+    return "  (" + ", ".join(f"{k} {v}" for k, v in cnt.most_common(n)) + ")"
+
+
+def _stage(label: str, kept: int, dropped: int = 0, elapsed: float | None = None, extra: str = "") -> None:
+    drop = f"  drop={dropped:,}" if dropped else ""
+    timing = f"  {elapsed:.1f}s" if elapsed is not None else ""
+    console.print(f"  [dim]→[/] {label}: [green]{kept:,}[/]{drop}{extra}{timing}")
 
 
 def install_uvloop() -> None:
@@ -89,6 +109,13 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
     console.print(
         f"[cyan]Parallelism:[/] gen_workers={cpu_workers}  "
         f"http_concurrency={cfg.concurrency}"
+    )
+    http_per_name = 10 + len(cfg.tlds) + (4 if secrets.has_web_search else 1)
+    console.print(
+        f"[dim]HTTP budget:[/] ~{http_per_name} req/name × online_batch={cfg.online_batch} "
+        f"per round. 404 cache 6h / hits 72h. "
+        f"GitHub search without token ≈ 10 req/min. "
+        f"No USPTO/Rospatent API — trademark is search-proxy only."
     )
 
     engine = GenerationEngine(cfg.seed, cfg.min_len, cfg.max_len, workers=cpu_workers)
@@ -152,23 +179,52 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                 f"[bold]Round {round_i} — clean {len(clean)}/{cfg.target_clean} "
                 f"(restarts={state.exploration_restarts})"
             )
-            console.print(f"Generating novelty batch of {cfg.generate_batch:,}…")
+            if clean:
+                console.print(
+                    "[dim]Holding:[/] " + ", ".join(c.display_name for c in clean)
+                )
+            console.print(
+                f"Generating novelty batch of {cfg.generate_batch:,} "
+                f"(chunked across CPU workers)…"
+            )
+            gen_done = {"n": 0}
+            t_gen = time.perf_counter()
 
-            provenance = engine.generate_all(cfg.generate_batch)
+            def _on_generator(label: str, produced: int, unique: int) -> None:
+                gen_done["n"] += 1
+                console.print(
+                    f"  [cyan]gen[/] {label:18} +{produced:,}  "
+                    f"unique={unique:,}  job {gen_done['n']}"
+                )
+
+            provenance = engine.generate_all(cfg.generate_batch, on_generator=_on_generator)
             for plugin in iter_generators():
                 for name in plugin.generate(max(100, cfg.generate_batch // 20)):
                     provenance.setdefault(name, f"plugin:{plugin.name}")
 
+            stats = engine.last_stats
+            _stage(
+                "generated",
+                len(provenance),
+                dropped=int(stats.get("culled", 0)),
+                elapsed=time.perf_counter() - t_gen,
+                extra=f"  unique-raw={int(stats.get('raw_unique', len(provenance))):,}",
+            )
+
             state.generated_total += len(provenance)
+            t0 = time.perf_counter()
             survivors, bad = offline.apply(provenance)
             rejected.extend(bad)
             for c in bad:
                 state.rejected[c.name] = list(c.rejection_reasons)
+            _stage("offline filters", len(survivors), len(bad), time.perf_counter() - t0, _reason_tally(bad))
 
+            t0 = time.perf_counter()
             survivors, sim_bad = similar.apply(survivors)
             rejected.extend(sim_bad)
             for c in sim_bad:
                 state.rejected[c.name] = list(c.rejection_reasons)
+            _stage("similarity", len(survivors), len(sim_bad), time.perf_counter() - t0, _reason_tally(sim_bad))
 
             # Multi-objective scores (beauty + brand + collision; novelty later)
             lm = engine.lm
@@ -177,20 +233,32 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
             def _brand(c: Candidate) -> Candidate:
                 return score_candidate(c, lm)
 
+            t0 = time.perf_counter()
             survivors = parallel_map(_brand, survivors, workers=cpu_workers, chunksize=64)
             scored: list[Candidate] = []
+            beauty_bad = 0
+            brand_bad = 0
             for c in survivors:
                 ok, why = passes_beauty_gates(c.name, min_beauty=min_beauty)
                 if not ok:
                     c.reject(Stage.BEAUTY, "; ".join(why[:3]))
                     rejected.append(c)
                     state.rejected[c.name] = list(c.rejection_reasons)
+                    beauty_bad += 1
                 elif c.scores.brand_score < brand_floor:
                     c.reject(Stage.SCORE, f"brand_score {c.scores.brand_score:.1f} too low")
                     rejected.append(c)
                     state.rejected[c.name] = list(c.rejection_reasons)
+                    brand_bad += 1
                 else:
                     scored.append(c)
+            _stage(
+                "beauty+brand",
+                len(scored),
+                beauty_bad + brand_bad,
+                time.perf_counter() - t0,
+                f"  (beauty {beauty_bad}, brand {brand_bad})",
+            )
 
             # Diversity-hard selection for online queue
             need = max(cfg.online_batch * 2, cfg.target_clean * 6)
@@ -223,6 +291,7 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                 state.rejected[c.name] = list(c.rejection_reasons)
 
             queue = tourney.winners
+            elite_drop = 0
             # Compete against permanent elite archive (soft gate when full)
             elite_floor = elite.must_beat_floor()
             if elite_floor > 0:
@@ -237,14 +306,19 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                         state.rejected[c.name] = list(c.rejection_reasons)
                     else:
                         kept_q.append(c)
+                elite_drop = len(queue) - len(kept_q)
                 queue = kept_q
 
             console.print(
-                f"Beauty shortlist: [green]{len(queue)}[/] "
+                f"  [dim]→[/] diversity/tournament: [green]{len(queue)}[/] online queue  "
                 f"(roots={sel.stats.get('unique_roots', 0):.0f}, "
                 f"gens={sel.stats.get('unique_generators', 0):.0f}, "
-                f"patterns={sel.stats.get('unique_patterns', 0):.0f}) "
-                f"— rejected {len(sel.rejected) + len(tourney.eliminated):,}"
+                f"patterns={sel.stats.get('unique_patterns', 0):.0f})  "
+                f"drop={len(sel.rejected) + len(tourney.eliminated) + elite_drop:,}"
+            )
+            console.print(
+                f"  [dim]lifetime[/] generated={state.generated_total:,}  "
+                f"checked={state.checked_total}  clean={len(clean)}/{cfg.target_clean}"
             )
 
             # Feed archive
@@ -267,7 +341,7 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                 MofNCompleteColumn(),
                 TimeElapsedColumn(),
                 console=console,
-                transient=True,
+                transient=False,
             ) as progress:
                 task = progress.add_task("Online validation", total=len(queue))
                 # Fire all validations concurrently; cancel remainder when target hit
@@ -323,10 +397,17 @@ async def run_engine(cfg: AppConfig, secrets: Secrets) -> list[Candidate]:
                                     f"all={cand.scores.overall:.1f} "
                                     f"root={cand.scores.phonetic_root} "
                                     f"({cand.generator})"
+                                    + (
+                                        f"  [yellow]unverified={','.join(cand.meta.get('unverified') or [])}[/]"
+                                        if cand.meta.get("unverified")
+                                        else ""
+                                    )
                                 )
                             else:
                                 rejected.append(cand)
                                 state.rejected[cand.name] = list(cand.rejection_reasons)
+                                why = cand.rejection_reasons[-1] if cand.rejection_reasons else "rejected"
+                                console.print(f"  [dim]reject[/] {cand.display_name:12} {why}")
                             progress.advance(task)
                             progress.update(
                                 task,

@@ -42,3 +42,27 @@ def test_scoring_sets_brand_score() -> None:
     assert 0 <= c.scores.brand_score <= 100
     assert c.scores.phonetic_root
     assert c.scores.cv_pattern
+
+
+def test_cull_caps_cross_generator_endings() -> None:
+    eng = GenerationEngine("cull-endings")
+    prov = {f"na{i:04d}on": "transformer" for i in range(80)}
+    prov.update({f"xy{i:04d}ka": "phoneme" for i in range(20)})
+    out = eng._cull_saturated_endings(prov, max_ending_share=0.08)
+    on_count = sum(1 for name in out if name.endswith("on"))
+    cap = max(8, int(len(prov) * 0.08))
+    assert on_count <= cap
+    assert any(name.endswith("ka") for name in out)
+
+
+def test_ending_pressure_blocks_flood() -> None:
+    eng = GenerationEngine("ending-cap")
+    eng._ending_cap = 99
+    probe = next(
+        (f"ko{ch}en" for ch in "bcdfghkmptvwz" if eng._accept(f"ko{ch}en")),
+        None,
+    )
+    assert probe is not None
+    eng._ending_cap = 3
+    eng._ending_pressure[probe[-2:]] = 3
+    assert not eng._accept(probe)

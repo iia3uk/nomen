@@ -30,6 +30,8 @@ GENERATOR_QUOTAS: dict[str, float] = {
 }
 
 LENGTH_WEIGHTS = {5: 15, 6: 25, 7: 30, 8: 20, 9: 10}
+# Split each generator quota so idle workers pick up remaining chunks.
+_GEN_CHUNK = 1200
 
 # Onsets / nuclei / codas drawn from premium brand statistics (not fixed dictionary words)
 _ONSETS = (
@@ -61,6 +63,9 @@ class GenerationEngine:
         self.winners: list[str] = []
         self._brand_set = set(self.lm.brands)
         self._letter_pressure: Counter[str] = Counter()
+        self._ending_pressure: Counter[str] = Counter()
+        self._ending_cap = 24
+        self.last_stats: dict[str, int] = {}
 
     def reseed_exploration(self, reason: str = "") -> None:
         """Jump to a new random region of search space (anti-convergence)."""
@@ -68,6 +73,7 @@ class GenerationEngine:
         self.rng = random.Random(self.base_seed ^ (self.exploration_salt * 0x9E3779B9))
         self.lm = BrandLanguageModels(seed=self.base_seed + self.exploration_salt * 9973)
         self._letter_pressure.clear()
+        self._ending_pressure.clear()
         # Keep winners, wipe local mutation archive to escape basin
         self.archive = list(self.winners)
 
@@ -97,14 +103,19 @@ class GenerationEngine:
         if brand_phonotactic_score(n) < 72:
             return False
         # Letter-pressure: reject if batch already flooded with same letters
-        pressure = sum(self._letter_pressure[c] for c in set(n) & set("rlns a"))
+        pressure = sum(self._letter_pressure[c] for c in set(n) & set("rlnsa"))
         if pressure > 40 and soft_consonant_ratio(n) > 0.35:
+            return False
+        end = n[-2:] if len(n) >= 2 else n
+        if self._ending_pressure[end] >= self._ending_cap:
             return False
         return True
 
     def _commit(self, name: str) -> None:
         for c in name:
             self._letter_pressure[c] += 1
+        if len(name) >= 2:
+            self._ending_pressure[name[-2:]] += 1
 
     def _sample_from_probs(self, probs: dict[str, float], temperature: float = 1.0) -> str:
         items = []
@@ -411,11 +422,51 @@ class GenerationEngine:
     def gen_genetic(self, count: int) -> list[str]:
         return self.gen_mutation(count)
 
-    def generate_all(self, total: int) -> dict[str, str]:
+    def _snapshot_pressure(self) -> tuple[dict[str, int], dict[str, int]]:
+        """Letter/ending counts from archive + winners, shared into worker processes."""
+        letters: Counter[str] = Counter()
+        endings: Counter[str] = Counter()
+        for raw in list(self.archive[-200:]) + list(self.winners[-64:]):
+            n = normalize(raw)
+            letters.update(n)
+            if len(n) >= 2:
+                endings[n[-2:]] += 1
+        return dict(letters), dict(endings)
+
+    def _cull_saturated_endings(
+        self,
+        provenance: dict[str, str],
+        *,
+        max_ending_share: float = 0.06,
+    ) -> dict[str, str]:
+        """Drop cross-generator ending collapse after isolated workers merge."""
+        names = list(provenance.keys())
+        if len(names) < 40:
+            return provenance
+        cap = max(8, int(len(names) * max_ending_share))
+        order = names[:]
+        self.rng.shuffle(order)
+        used: Counter[str] = Counter()
+        kept: dict[str, str] = {}
+        for name in order:
+            end = name[-2:] if len(name) >= 2 else name
+            if used[end] >= cap:
+                continue
+            used[end] += 1
+            kept[name] = provenance[name]
+        return kept
+
+    def generate_all(
+        self,
+        total: int,
+        on_generator: Callable[[str, int, int], None] | None = None,
+    ) -> dict[str, str]:
         """Merge generators under quotas — parallel across CPU cores."""
         from nomen.parallel import parallel_generate
 
-        self._letter_pressure.clear()
+        letters, endings = self._snapshot_pressure()
+        self._letter_pressure = Counter(letters)
+        self._ending_pressure = Counter(endings)
         shares = {k: max(1, int(total * v)) for k, v in GENERATOR_QUOTAS.items()}
         while sum(shares.values()) < total:
             shares["experimental"] += 1
@@ -425,22 +476,44 @@ class GenerationEngine:
                     shares[k] -= 1
                     break
 
-        payloads = [
-            {
-                "label": label,
-                "count": count,
-                "seed": self.seed_str,
-                "salt": self.exploration_salt,
-                "min_len": self.min_len,
-                "max_len": self.max_len,
-                "archive": self.archive[-200:],
-                "winners": self.winners[-64:],
-            }
-            for label, count in shares.items()
-        ]
-        provenance = parallel_generate(payloads, workers=self.workers)
+        payloads: list[dict[str, object]] = []
+        for label, count in shares.items():
+            left = count
+            chunk_i = 0
+            while left > 0:
+                n = min(_GEN_CHUNK, left)
+                payloads.append(
+                    {
+                        "label": label,
+                        "count": n,
+                        "chunk": chunk_i,
+                        "seed": self.seed_str,
+                        "salt": self.exploration_salt,
+                        "min_len": self.min_len,
+                        "max_len": self.max_len,
+                        "archive": self.archive[-200:],
+                        "winners": self.winners[-64:],
+                        "pressure": letters,
+                        "endings": endings,
+                    }
+                )
+                left -= n
+                chunk_i += 1
+        provenance = parallel_generate(payloads, workers=self.workers, on_done=on_generator)
+        before = len(provenance)
+        provenance = self._cull_saturated_endings(provenance)
+        self.last_stats = {
+            "raw_unique": before,
+            "kept": len(provenance),
+            "culled": before - len(provenance),
+            "engines": len(payloads),
+        }
 
         sample = list(provenance.keys())
         self.rng.shuffle(sample)
         self.archive = list(dict.fromkeys(self.archive + sample[:200]))[-800:]
+        self._letter_pressure.clear()
+        self._ending_pressure.clear()
+        for name in provenance:
+            self._commit(name)
         return provenance

@@ -83,7 +83,7 @@ def main(
         f"strict={cfg.strict} concurrency={cfg.concurrency} workers={cfg.workers or 'auto'}"
     )
     if not secrets.github_token:
-        console.print("[yellow]GITHUB_TOKEN missing — GitHub may rate-limit.[/]")
+        console.print("[yellow]GITHUB_TOKEN missing — GitHub may rate-limit (~10 search req/min).[/]")
     if not secrets.has_web_search:
         console.print("[yellow]No Brave/SerpAPI/Bing key — web/trademark depth reduced.[/]")
 

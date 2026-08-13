@@ -114,5 +114,7 @@ def score_candidate(candidate: Candidate, lm: BrandLanguageModels | None = None)
         "premium": bd.premium,
         "naturalness": bd.naturalness,
         "rejects": list(bd.reject_reasons),
+        "gate": bd.gate,
+        "raw": bd.raw_beauty,
     }
     return candidate

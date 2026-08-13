@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from nomen.diversity.clustering import same_family
+from nomen.diversity.clustering import cluster_candidates, same_family
 from nomen.diversity.features import phonetic_root
 from nomen.diversity.novelty import NoveltyArchive
 from nomen.diversity.selector import DiversitySelector
@@ -23,6 +23,25 @@ def test_same_family_detects_pler_cluster() -> None:
     assert same_family("seralea", "seralio")
     assert not same_family("plerasta", "voryx")
     assert not same_family("nestra", "quivon")
+    # 5-letter distance-2 pairs must not collapse (old lev<=2 over-merged)
+    assert not same_family("vireo", "viran")
+    assert not same_family("nesta", "nesko")
+
+
+def test_cluster_rep_is_beauty_led() -> None:
+    pretty = _cand("plerasta")
+    pretty.scores.beauty_score = 92
+    pretty.scores.overall = 88
+    pretty.scores.novelty_score = 40
+    pretty.scores.brand_score = 80
+    novel = _cand("plerora")
+    novel.scores.beauty_score = 60
+    novel.scores.overall = 70
+    novel.scores.novelty_score = 99
+    novel.scores.brand_score = 80
+    clusters = cluster_candidates([pretty, novel])
+    assert len(clusters) == 1
+    assert clusters[0].representative.name == "plerasta"
 
 
 def test_selector_keeps_one_per_family() -> None:
