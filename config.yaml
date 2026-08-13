@@ -1,0 +1,45 @@
+# Nomen v5 — beauty-led brand discovery (brands, not synthetic identifiers)
+# Overall = Beauty 35% + Brand 30% + Novelty 20% + Collision 15%
+
+seed: ai-native-cms-mcp-platform
+generate_batch: 30000
+online_batch: 80
+target_clean: 20
+min_overall_score: 88.0
+min_beauty_score: 72.0
+min_len: 5
+max_len: 9
+strict: true
+resume: true             # set false or pass --fresh to ignore nomen_results/checkpoint.json
+concurrency: 32          # parallel HTTP checks
+pause_seconds: 0.05
+timeout: 15.0
+workers: 0               # 0 = auto CPU process pool for generators
+output_dir: nomen_results
+
+tlds:
+  - com
+  - io
+  - dev
+  - ai
+  - app
+  - tech
+  - cloud
+  - so
+
+similarity:
+  levenshtein_max: 2
+  damerau_max: 2
+  jaro_winkler_min: 0.88
+  ngram_min: 0.72
+  embedding_cosine_min: 0.82
+  metaphone_match: true
+
+embeddings:
+  enabled: false   # set true for highest similarity quality (downloads torch model)
+  model: sentence-transformers/all-MiniLM-L6-v2
+
+generation:
+  rounds_max: 0          # 0 = unlimited until target_clean
+  evolution_generations: 8
+  winner_pool: 64

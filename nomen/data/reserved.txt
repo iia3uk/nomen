@@ -1,0 +1,3 @@
+# Occupied / owned brands — never emit as discoveries.
+# Also used for collision/similarity so near-matches get rejected.
+jasefly
