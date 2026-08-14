@@ -27,6 +27,7 @@ def cv_pattern(name: str) -> str:
     return "".join("V" if is_vowel(c) else "C" for c in n)
 
 
+@lru_cache(maxsize=8192)
 def phonetic_root(name: str) -> str:
     """
     Stable family key for a coined brand.
@@ -46,11 +47,13 @@ def phonetic_root(name: str) -> str:
     return n[:3]
 
 
+@lru_cache(maxsize=8192)
 def metaphone_pair(name: str) -> tuple[str, str]:
     a, b = doublemetaphone(normalize(name))
     return a or "", b or ""
 
 
+@lru_cache(maxsize=4096)
 def bigram_vector(name: str) -> np.ndarray:
     """26*26 sparse bigram bag normalized to unit length."""
     n = normalize(name)
